@@ -15,7 +15,7 @@ import pandas as pd
 from rouge import Rouge
 
 PERMITTED_TITLES_SOURCE = "scientific-paper-summarisation/Data/Utility_Data/permitted_titles.txt"
-non_content_keys = ['MAIN-TITLE', 'HIGHLIGHTS', 'KEYPHRASES', 'ABSTRACT', 'ACKNOWLEDGEMENTS', 'REFERENCES']
+non_content_keys = ['', 'MAIN-TITLE', 'HIGHLIGHTS', 'KEYPHRASES', 'ABSTRACT', 'ACKNOWLEDGEMENTS', 'REFERENCES']
 stop_words = set(stopwords.words('english'))
 
 def preprocess_sentence(sentence, filter_sentence=True):

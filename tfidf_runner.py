@@ -13,7 +13,7 @@ import pandas as pd
 from rouge import Rouge
 
 PERMITTED_TITLES_SOURCE = "scientific-paper-summarisation/Data/Utility_Data/permitted_titles.txt"
-non_content_keys = ['MAIN-TITLE', 'HIGHLIGHTS', 'KEYPHRASES', 'ABSTRACT', 'ACKNOWLEDGEMENTS', 'REFERENCES']
+non_content_keys = ['', 'MAIN-TITLE', 'HIGHLIGHTS', 'KEYPHRASES', 'ABSTRACT', 'ACKNOWLEDGEMENTS', 'REFERENCES']
 stop_words = set(stopwords.words('english'))
 
 def preprocess_sentence(sentence, filter_sentence=True):
@@ -196,10 +196,12 @@ def compute_metrics(paper_abstract: np.array, generated_summary: np.array):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Summarise papers')
     parser.add_argument('--paper_path', type=str, help='Directory where parsed papers are stored')
+    parser.add_argument('--summary_path', type=str, help='Directory where generated summaries are stored')
     parser.add_argument('--sum_length', type=float, help='Percentage of paper to determine summary length')
     args = parser.parse_args()
 
     PAPER_PATH = args.paper_path
+    SUMMARY_PATH = args.summary_path
     paper_file_names = os.listdir(PAPER_PATH)
 
     # Define desired number of sentences for a summary
@@ -226,6 +228,10 @@ if __name__ == '__main__':
 
         generated_summary = summarize_paper(tokenized_paper, paper_sentences, NR_OF_SENTENCES)
         generated_summaries[i] = generated_summary
+
+        # Write summary to disk for back-up
+        with open(f'{SUMMARY_PATH}/tfidf/{paper_file_name}', 'w') as sum_file:
+            sum_file.write(generated_summary)
         
     # Compute ROUGE scores
     compute_metrics(ground_truth_summaries, generated_summaries)
