@@ -1,8 +1,9 @@
 # Folders
-Data
+data
 env
 scientific-paper-summarisation
 summaries
+gen_summaries
 .ipynb_checkpoints
 
 # Files
