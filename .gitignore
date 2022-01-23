@@ -4,8 +4,11 @@ env
 scientific-paper-summarisation
 summaries
 gen_summaries
+manual_analysis
+abstracts
 .ipynb_checkpoints
 
 # Files
 cspubsum_test_ids.txt
+*.npy
 

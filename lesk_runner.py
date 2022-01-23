@@ -1,7 +1,5 @@
 import argparse
-from collections import Counter, defaultdict
-from itertools import chain
-import math
+from collections import defaultdict, Counter
 import os
 import re
 from tqdm import tqdm
@@ -12,10 +10,9 @@ from nltk.corpus import stopwords, wordnet as wn
 from nltk.tokenize import sent_tokenize, word_tokenize
 import numpy as np
 import pandas as pd
-from rouge import Rouge
 
 PERMITTED_TITLES_SOURCE = "scientific-paper-summarisation/Data/Utility_Data/permitted_titles.txt"
-non_content_keys = ['', 'MAIN-TITLE', 'HIGHLIGHTS', 'KEYPHRASES', 'ABSTRACT', 'ACKNOWLEDGEMENTS', 'REFERENCES']
+non_content_keys = ['', 'MAIN-TITLE', 'HIGHLIGHTS', 'KEYPHRASES', 'ABSTRACT', 'ACKNOWLEDGEMENTS', 'ACKNOWLEDGEMENTS', 'REFERENCES']
 stop_words = set(stopwords.words('english'))
 
 def preprocess_sentence(sentence, filter_sentence=True):
@@ -138,25 +135,6 @@ def get_paper_as_words(tokenized_paper):
             
     return all_words
 
-def compute_sentence_freq(words, sentences):
-    freq_dict = {}
-    for word in words:
-        freq_dict[word] = sum(1 for sent in sentences if word in sent)
-    return freq_dict
-
-def compute_tf(word: str, sentence: List):
-    freq = sum(1 for sent_word in sentence if sent_word == word)
-    return freq / len(sentence)
-
-def compute_idf(word: str, no_sentences: int, freq_dict: Counter):
-    if word in freq_dict:
-        sentence_freq = freq_dict[word]
-        return math.log10(no_sentences / sentence_freq)
-    return 0
-
-def compute_tfidf(tf: float, idf: float):
-    return tf * idf
-
 def map_pos_tag(tag: str):
     if tag.startswith('J'):
         return ['a', 's']
@@ -168,66 +146,72 @@ def map_pos_tag(tag: str):
         return ['r']
     return ''
 
-def compute_sentence_weight(sentence_pos, sentence, dict_freq, no_sentences):    
+def compute_sentence_weight(sentences_pos: List, text: Counter, total_words, total_words_synsets) -> int:
+    
     sentence_score = 0
+    
+    # Iterate over all words in the sentence
+    for word, pos in sentences_pos:
 
-    for word, pos in sentence_pos:
+        total_words += 1
 
         # Map NLTK POS tag to Wordnet POS tag
         mapped_tag = map_pos_tag(pos)
-
-        # Get synonyms of word
+        
+        # Get word synsets that have the same POS tag
         synsets = []
-
-        # Only include words that have the same POS tag
         for w in wn.synsets(word):
             if w.pos() in mapped_tag:
                 synsets.append(w)
 
-        synonyms = set(chain.from_iterable([word.lemma_names() for word in synsets]))
-
-        # Add original word to set of synonyms
-        synonyms.add(word)
-
-        # Compute tf-idf
-        for syn_word in synonyms:
-            tf = compute_tf(syn_word, sentence)
-            idf = compute_idf(syn_word, no_sentences, dict_freq)
-            sentence_score += compute_tfidf(tf, idf)
+        total_words_synsets += len(synsets)
         
-    return sentence_score
+        # If word has synsets (i.e., is known by wordnet), continue
+        best_synset_score = 0
+        for synset in synsets:
+            
+            # Get and tokenize gloss and remove stopwords and punctuation
+            filtered_gloss, _ = preprocess_sentence(synset.definition())
+            
+            # Compute score
+            score = 0
+            for def_word in filtered_gloss:
+                if def_word in text:
+                    score += text[def_word]
 
-def summarize_paper(tokenized_paper, tokenized_paper_pos, paper_sentences, nr_sentences=5):
+            if score > best_synset_score:
+                best_synset_score = score
+                
+        # Update sentence score
+        sentence_score += best_synset_score
+
+    return sentence_score, total_words, total_words_synsets
+
+def summarize_paper(tokenized_paper, tokenized_paper_pos, paper_sentences, nr_sentences, total_words, total_words_synsets):
     sentence_weights = []
     
     # Get word representation of paper
     paper_words = get_paper_as_words(tokenized_paper)
-    
-    processed_sentences = []
-    processed_sentences_pos = []
-    original_sentences = []
-    
-    # Get all sentences in paper
+    counted_words = Counter(paper_words)
+
     for section in tokenized_paper.keys():
         
         if section not in non_content_keys:
-            processed_sentences_pos.extend(tokenized_paper_pos[section])
-            processed_sentences.extend(tokenized_paper[section])
-            original_sentences.extend(paper_sentences[section])
-    
-    # For every word, compute how often they appear in a sentence
-    freq_dict = compute_sentence_freq(paper_words, processed_sentences)
-    no_sentences = len(processed_sentences)
-    
-    for tok_sentence_pos, tok_sentence, orig_sentence in zip(processed_sentences_pos, processed_sentences, original_sentences):
-        
-        # Compute sentence weight and store with sentence
-        sentence_weight = compute_sentence_weight(tok_sentence_pos, tok_sentence, freq_dict, no_sentences)
-        sentence_weights.append((orig_sentence[0], orig_sentence[1], sentence_weight))
+            section_content = tokenized_paper[section]
+            section_content_pos = tokenized_paper_pos[section]
+            section_sentences = paper_sentences[section]
+            
+            for tok_sentence, tok_sentence_pos, orig_sentence in zip(section_content, section_content_pos, section_sentences):
+                
+                # Compute sentence weight and store with sentence
+                sentence_weight, total_words, total_words_synsets = compute_sentence_weight(tok_sentence_pos, counted_words, total_words, total_words_synsets)
+                sentence_weights.append((orig_sentence[0], orig_sentence[1], sentence_weight))
             
     # Create a dataframe of all sentences and sort descending by weight
     sentence_weights = pd.DataFrame(sentence_weights, columns=['sentence', 'index', 'weight'])
     sentence_weights.sort_values(by=['weight'], ascending=False, inplace=True)
+
+    print(sentence_weights['weight'].head(nr_sentences).mean())
     
     # Select desired number of sentences and sort by order of occurence in text
     summary = sentence_weights.head(nr_sentences).sort_values(by=['index'])['sentence'].values
@@ -235,25 +219,20 @@ def summarize_paper(tokenized_paper, tokenized_paper_pos, paper_sentences, nr_se
     # Join selected strings into a summary
     string_summary = ' '.join(summary)
     
-    return string_summary
-
-rouge = Rouge()
-
-def compute_metrics(paper_abstract: np.array, generated_summary: np.array):
-    rouge_scores = rouge.get_scores(generated_summary, paper_abstract, avg=True)
-    print(rouge_scores)
-#     return rouge_scores['rouge-1'].values(), rouge_scores['rouge-2'].values(), rouge_scores['rouge-l'].values(),
+    return string_summary, total_words, total_words_synsets
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Summarise papers')
     parser.add_argument('--paper_path', type=str, help='Directory where parsed papers are stored')
     parser.add_argument('--summary_path', type=str, help='Directory where generated summaries are stored')
-    parser.add_argument('--sum_length', type=int, help='Percentage of paper to determine summary length')
+    parser.add_argument('--sum_length', type=int, help='Number of sentences for a paper')
     args = parser.parse_args()
 
+    total_words = 0
+    total_words_synsets = 0
+
     PAPER_PATH = args.paper_path
-    SUMMARY_PATH = args.summary_path
-    # PAPER_PATH = 'data/parsed_papers'
+    SUMMARY_PATH = ''
     paper_file_names = os.listdir(PAPER_PATH)
 
     # Define desired number of sentences for a summary
@@ -274,16 +253,9 @@ if __name__ == '__main__':
         ground_truth_summaries[i] = paper_abstract
         
         # Summarize paper
-        # sum_length = int(NR_OF_SENTENCES * sum(len(section_sentences) for section_sentences in paper_sentences))
-        # sum_length = int(NR_OF_SENTENCES * len(paper_sentences))
-        # print(sum_length)
-
-        generated_summary = summarize_paper(tokenized_paper, tokenized_paper_pos, paper_sentences, NR_OF_SENTENCES)
+        generated_summary, total_words, total_words_synsets = summarize_paper(tokenized_paper, tokenized_paper_pos, paper_sentences, NR_OF_SENTENCES, total_words, total_words_synsets)
         generated_summaries[i] = generated_summary
 
-        # Write summary to disk for back-up
-        with open(f'{SUMMARY_PATH}/tfidf_wordnet/{paper_file_name}', 'w') as sum_file:
+        # Write summary to disk for analysis
+        with open(f'{SUMMARY_PATH}/wordnet/{paper_file_name}', 'w') as sum_file:
             sum_file.write(generated_summary)
-        
-    # Compute ROUGE scores
-    compute_metrics(ground_truth_summaries, generated_summaries)

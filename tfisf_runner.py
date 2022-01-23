@@ -1,21 +1,18 @@
 import argparse
-from collections import defaultdict
+from collections import Counter, defaultdict
+import math
 import os
 import re
 from tqdm import tqdm
 from typing import List
 
-from nltk import pos_tag
-from nltk.corpus import stopwords, wordnet as wn
+from nltk.corpus import stopwords
 from nltk.tokenize import sent_tokenize, word_tokenize
 import numpy as np
 import pandas as pd
-from rouge import Rouge
-
-# from tfidf_runner import NR_OF_SENTENCES, PAPER_PATH
 
 PERMITTED_TITLES_SOURCE = "scientific-paper-summarisation/Data/Utility_Data/permitted_titles.txt"
-non_content_keys = ['', 'MAIN-TITLE', 'HIGHLIGHTS', 'KEYPHRASES', 'ABSTRACT', 'ACKNOWLEDGEMENTS', 'REFERENCES']
+non_content_keys = ['', 'MAIN-TITLE', 'HIGHLIGHTS', 'KEYPHRASES', 'ABSTRACT', 'ACKNOWLEDGEMENTS', 'ACKNOWLEDGEMENTS', 'REFERENCES']
 stop_words = set(stopwords.words('english'))
 
 def preprocess_sentence(sentence, filter_sentence=True):
@@ -29,19 +26,16 @@ def preprocess_sentence(sentence, filter_sentence=True):
         sentence = sentence.lower()
         word_tokens = word_tokenize(sentence)
 
-        # Apply POS tagging on word
-        pos_tags = pos_tag(word_tokens)
-
         # Remove stopwords from sentence
         filtered_sentence = [w for w in word_tokens if not w.lower() in stop_words and w.isalnum()]
-        filtered_sentence_pos = [(w, tag) for w, tag in pos_tags if not w.lower() in stop_words and w.isalnum()]
-        return filtered_sentence, filtered_sentence_pos
+        return filtered_sentence
     
     # Remove all line endings, multiple whitespace etc. from sentence
-    cleaned_sentence = ' '.join(sentence.split())  
+    cleaned_sentence = ' '.join(sentence.split())    
     return cleaned_sentence
 
 def paper_tokenize(text, sentences_as_lists=False, preserve_order=False):
+    # Implementation derived from: https://github.com/EdCo95/scientific-paper-summarisation
     """
     Takes a paper with the sections delineated by '@&#' and splits them into a dictionary where the key is the section
     and the value is the text under that section. This could probably be a bit more efficient but it works well enough.
@@ -67,7 +61,6 @@ def paper_tokenize(text, sentences_as_lists=False, preserve_order=False):
     # After the for loop, this dictionary will have keys relating to each permitted section, and values corresponding
     # to the text of that section
     sentences_with_states = defaultdict(str)
-    sentences_with_states_pos = defaultdict(str)
     sentences = defaultdict(str)
 
     section_counts = defaultdict(int)
@@ -104,27 +97,17 @@ def paper_tokenize(text, sentences_as_lists=False, preserve_order=False):
                 if sentences_as_lists:
                     if section_counts[state] > 1:
                         state = state + "_" + str(section_counts[state])
-
-                    sentence_states = []
-                    sentence_states_pos = []
-                    for x in sent_tokenize(text):
-                        filtered_sentence, filtered_sentence_pos = preprocess_sentence(x)
-                        sentence_states.append(filtered_sentence)
-                        sentence_states_pos.append(filtered_sentence_pos)
-
-                    sentences_with_states[state] = sentence_states
-                    sentences_with_states_pos[state] = sentence_states_pos
+                    sentences_with_states[state] = ([preprocess_sentence(x) for x in sent_tokenize(text)], pos)
                     
                     sentence_storage = []
                     for x in sent_tokenize(text):
-                        sentence = preprocess_sentence(x, filter_sentence=False)
-                        sentence_storage.append((sentence, sentence_index))
+                        sentence_storage.append((preprocess_sentence(x, filter_sentence=False), sentence_index))
                         sentence_index+=1
                     sentences[state] = sentence_storage
             if state == "ABSTRACT":
                 paper_abstract = text.strip()
 
-    return sentences, sentences_with_states, sentences_with_states_pos, paper_abstract
+    return sentences, sentences_with_states, paper_abstract
 
 def get_paper_as_words(tokenized_paper):
     all_words = []
@@ -134,72 +117,63 @@ def get_paper_as_words(tokenized_paper):
         # retrieve words
         if key not in non_content_keys:
             section_content = tokenized_paper[key]
-            [all_words.extend(s) for s in section_content]
+            [all_words.extend(s) for s in section_content[0]]
             
     return all_words
 
-def map_pos_tag(tag: str):
-    if tag.startswith('J'):
-        return ['a', 's']
-    if tag.startswith('V'):
-        return ['v']
-    if tag.startswith('N'):
-        return ['n']
-    if tag.startswith('R'):
-        return ['r']
-    return ''
+def compute_sentence_freq(words, sentences):
+    freq_dict = {}
+    for word in words:
+        freq_dict[word] = sum(1 for sent in sentences if word in sent)
+    return freq_dict
 
-def compute_sentence_weight(sentence: List, sentences_pos: List, text: List) -> int:
+def compute_tf(word: str, sentence: List):
+    freq = sum(1 for sent_word in sentence if sent_word == word)
+    return freq / len(sentence)
+
+def compute_isf(word: str, no_sentences: int, freq_dict: Counter):
+    sentence_freq = freq_dict[word]
     
+    return math.log10(no_sentences / sentence_freq)
+
+def compute_tfisf(tf: float, isf: float):
+    return tf * isf
+
+def compute_sentence_weight(sentence, dict_freq, no_sentences, no_words):    
     sentence_score = 0
-    
-    # Iterate over all words in the sentence
-    for word, pos in sentences_pos:
-
-        # Map NLTK POS tag to Wordnet POS tag
-        mapped_tag = map_pos_tag(pos)
+    for word in sentence:
+        tf = compute_tf(word, dict_freq, no_words)
+        isf = compute_isf(word, no_sentences, dict_freq)
+        sentence_score += compute_tfisf(tf, isf)
         
-        # Get word synsets that have the same POS tag
-        synsets = []
-        for w in wn.synsets(word):
-            if w.pos() in mapped_tag:
-                synsets.append(w)
-        
-        # If word has synsets (i.e., is known by wordnet), continue
-        best_synset_score = 0
-        for synset in synsets:
-            
-            # Get and tokenize gloss and remove stopwords and punctuation
-            filtered_gloss, _ = preprocess_sentence(synset.definition())
-            
-            # Compute score
-            score = sum(1 for def_word in filtered_gloss if def_word in text)
-            if score > best_synset_score:
-                best_synset_score = score
-                
-        # Update sentence score
-        sentence_score += best_synset_score
-
     return sentence_score
 
-def summarize_paper(tokenized_paper, tokenized_paper_pos, paper_sentences, nr_sentences=5):
+def summarize_paper(tokenized_paper, paper_sentences, nr_sentences=5):
     sentence_weights = []
     
     # Get word representation of paper
     paper_words = get_paper_as_words(tokenized_paper)
     
+    processed_sentences = []
+    original_sentences = []
+    
+    # Get all sentences in paper
     for section in tokenized_paper.keys():
         
         if section not in non_content_keys:
-            section_content = tokenized_paper[section]
-            section_content_pos = tokenized_paper_pos[section]
-            section_sentences = paper_sentences[section]
-            
-            for tok_sentence, tok_sentence_pos, orig_sentence in zip(section_content, section_content_pos, section_sentences):
-                
-                # Compute sentence weight and store with sentence
-                sentence_weight = compute_sentence_weight(tok_sentence, tok_sentence_pos, paper_words)
-                sentence_weights.append((orig_sentence[0], orig_sentence[1], sentence_weight))
+            processed_sentences.extend(tokenized_paper[section][0])
+            original_sentences.extend(paper_sentences[section])
+    
+    # For every word, compute how often they appear in a sentence
+    freq_dict = compute_sentence_freq(paper_words, processed_sentences)
+    no_sentences = len(processed_sentences)
+    no_words = len(paper_words)
+    
+    for tok_sentence, orig_sentence in zip(processed_sentences, original_sentences):
+        
+        # Compute sentence weight and store with sentence
+        sentence_weight = compute_sentence_weight(tok_sentence, freq_dict, no_sentences, no_words)
+        sentence_weights.append((orig_sentence[0], orig_sentence[1], sentence_weight))
             
     # Create a dataframe of all sentences and sort descending by weight
     sentence_weights = pd.DataFrame(sentence_weights, columns=['sentence', 'index', 'weight'])
@@ -213,28 +187,19 @@ def summarize_paper(tokenized_paper, tokenized_paper_pos, paper_sentences, nr_se
     
     return string_summary
 
-rouge = Rouge()
-
-def compute_metrics(paper_abstract: np.array, generated_summary: np.array):
-    rouge_scores = rouge.get_scores(generated_summary, paper_abstract, avg=True)
-    print(rouge_scores)
-#     return rouge_scores['rouge-1'].values(), rouge_scores['rouge-2'].values(), rouge_scores['rouge-l'].values(),
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Summarise papers')
     parser.add_argument('--paper_path', type=str, help='Directory where parsed papers are stored')
     parser.add_argument('--summary_path', type=str, help='Directory where generated summaries are stored')
-    parser.add_argument('--sum_length', type=int, help='Number of sentences for a paper')
+    parser.add_argument('--sum_length', type=int, help='Percentage of paper to determine summary length')
     args = parser.parse_args()
 
     PAPER_PATH = args.paper_path
-    # PAPER_PATH = 'data/parsed_papers'
     SUMMARY_PATH = args.summary_path
     paper_file_names = os.listdir(PAPER_PATH)
 
     # Define desired number of sentences for a summary
     NR_OF_SENTENCES = args.sum_length
-    # NR_OF_SENTENCES = 3
 
     ground_truth_summaries = np.empty(len(paper_file_names), dtype='object')
     generated_summaries = np.empty(len(paper_file_names), dtype='object')
@@ -247,16 +212,15 @@ if __name__ == '__main__':
             paper_content = paper_file.read()
         
         # Tokenize paper into sentences (and sentences into separate words) and get paper abstract
-        paper_sentences, tokenized_paper, tokenized_paper_pos, paper_abstract = paper_tokenize(paper_content, sentences_as_lists=True, preserve_order=True)
+        paper_sentences, tokenized_paper, paper_abstract = paper_tokenize(paper_content, sentences_as_lists=True, preserve_order=True)
         ground_truth_summaries[i] = paper_abstract
-        
-        # Summarize paper
-        generated_summary = summarize_paper(tokenized_paper, tokenized_paper_pos, paper_sentences, NR_OF_SENTENCES)
+
+        # Generate summary
+        generated_summary = summarize_paper(tokenized_paper, paper_sentences, NR_OF_SENTENCES)
         generated_summaries[i] = generated_summary
 
-        # Write summary to disk for back-up
-        with open(f'{SUMMARY_PATH}/wordnet/{paper_file_name}', 'w') as sum_file:
+        # Write summary to disk for analysis
+        with open(f'{SUMMARY_PATH}/tfisf/{paper_file_name}', 'w') as sum_file:
             sum_file.write(generated_summary)
-        
-    # Compute ROUGE scores
-    compute_metrics(ground_truth_summaries, generated_summaries)
+
+    print('Finished summarising')
